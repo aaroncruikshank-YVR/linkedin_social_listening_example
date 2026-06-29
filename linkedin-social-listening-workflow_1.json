@@ -1,0 +1,297 @@
+{
+  "name": "LinkedIn Social Listening Pipeline",
+  "nodes": [
+    {
+      "id": "a0000001-0001-0001-0001-000000000001",
+      "name": "Schedule Trigger",
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "expression": "0 6 * * 1-5",
+              "field": "cronExpression"
+            }
+          ]
+        }
+      },
+      "position": [0, 0],
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3
+    },
+    {
+      "id": "a0000001-0001-0001-0001-000000000004",
+      "name": "Apify - Trigger Search",
+      "parameters": {
+        "jsonBody": "{\n  \"keywords\": [\n    \"strategic planning\",\n    \"market intelligence\",\n    \"market entry\",\n    \"competitive intelligence\",\n    \"business case\",\n    \"due diligence\",\n    \"go to market strategy\",\n    \"market validation\",\n    \"environmental scan\",\n    \"commercial due diligence\",\n    \"win-loss analysis\",\n    \"scenario planning\",\n    \"voice of customer\",\n    \"customer discovery\",\n    \"opportunity assessment\"\n  ],\n  \"date_filter\": \"past-24h\",\n  \"sort_by\": \"date_posted\",\n  \"max_posts\": 100\n}",
+        "method": "POST",
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "url": "https://api.apify.com/v2/acts/datadoping~linkedin-posts-search-scraper/runs?token=YOUR_APIFY_TOKEN"
+      },
+      "position": [304, 0],
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4
+    },
+    {
+      "id": "a0000001-0001-0001-0001-000000000019",
+      "name": "Wait for Apify",
+      "parameters": {
+        "amount": 5,
+        "unit": "minutes"
+      },
+      "position": [560, 0],
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "webhookId": "540a4f25-29e4-4502-87bf-62b4101a81b9"
+    },
+    {
+      "id": "a0000001-0001-0001-0001-000000000020",
+      "name": "Apify - Get Results",
+      "parameters": {
+        "options": {},
+        "url": "https://api.apify.com/v2/acts/datadoping~linkedin-posts-search-scraper/runs/last/dataset/items?token=YOUR_APIFY_TOKEN"
+      },
+      "position": [816, 0],
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4
+    },
+    {
+      "id": "a0000001-0001-0001-0001-000000000008",
+      "name": "Normalize Results",
+      "parameters": {
+        "jsCode": "const results = [];\n\nfor (const item of $input.all()) {\n  const data = item.json;\n  const author = data.author || {};\n\n  const postUrl = data.post_url || '';\n  if (!postUrl.includes('linkedin.com')) continue;\n\n  const content = data.content || {};\n  // Drop LinkedIn-native job postings\n  if ((content.type || '') === 'job') continue;\n\n  // Drop company pages (author.profile_url contains /company/)\n  const profileUrlRaw = author.profile_url || '';\n  if (profileUrlRaw.includes('/company/')) continue;\n\n  let profileUrl = profileUrlRaw.split('?')[0].replace(/\\/$/, '').toLowerCase();\n\n  const stats = data.stats || {};\n  const likes = parseInt(stats.total_reactions) || 0;\n  const comments = parseInt(stats.comments) || 0;\n  const shares = parseInt(stats.shares) || 0;\n\n  const articleTitle = (content.article && content.article.title) || '';\n  const bodyText = data.text || '';\n  // Normalize curly quotes to straight so downstream keyword filters match\n  let snippet = (bodyText + ' ' + articleTitle).trim().substring(0, 300);\n  snippet = snippet.replace(/[\\u2018\\u2019]/g, \"'\").replace(/[\\u201C\\u201D]/g, '\"');\n\n  results.push({\n    post_url: postUrl,\n    author_name: author.name || 'Unknown',\n    author_headline: author.headline || '',\n    author_linkedin_url: profileUrl,\n    company: '',\n    post_snippet: snippet,\n    source: 'apify',\n    keyword_matched: data.input || 'apify_search',\n    author_type: 'Individual',\n    content_type: content.type || '',\n    article_title: articleTitle,\n    numLikes: likes,\n    numComments: comments,\n    numShares: shares,\n    engagement_score: likes + (comments * 3) + (shares * 2)\n  });\n}\n\nreturn results.map(r => ({ json: r }));"
+      },
+      "position": [1072, 0],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "a0000001-0001-0001-0001-000000000010",
+      "name": "Deduplicate",
+      "parameters": {
+        "jsCode": "const posts = $input.all().map(i => i.json);\n\nlet seenUrls = new Set();\ntry {\n  const sheetId = 'YOUR_GOOGLE_SHEET_ID';\n  const seenResponse = await this.helpers.requestWithAuthentication.call(this, 'googleSheetsOAuth2Api', {\n    method: 'GET',\n    url: `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Already%20Seen!A:A`,\n    json: true\n  });\n  if (seenResponse.values) {\n    for (const row of seenResponse.values) {\n      if (row[0] && row[0].includes('linkedin.com')) {\n        seenUrls.add(row[0]);\n      }\n    }\n  }\n} catch (err) {}\n\n// Drop posts already in the sheet AND duplicates within this run\nconst unseen = [];\nconst batchSeen = new Set();\nfor (const p of posts) {\n  if (!p.post_url) continue;\n  if (seenUrls.has(p.post_url)) continue;\n  if (batchSeen.has(p.post_url)) continue;\n  batchSeen.add(p.post_url);\n  unseen.push(p);\n}\nreturn unseen.map(r => ({ json: r }));"
+      },
+      "position": [1328, 0],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "a0000001-0001-0001-0001-000000000012",
+      "name": "Score and Classify",
+      "parameters": {
+        "jsCode": "const posts = $input.all().map(i => i.json);\n\nlet icpUrls = new Set();\ntry {\n  const sheetId = 'YOUR_GOOGLE_SHEET_ID';\n  const icpResponse = await this.helpers.requestWithAuthentication.call(this, 'googleSheetsOAuth2Api', {\n    method: 'GET',\n    url: `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/ICP%20Master%20List!A:A`,\n    json: true\n  });\n  if (icpResponse.values) {\n    for (const row of icpResponse.values) {\n      if (row[0] && row[0].includes('linkedin.com')) {\n        icpUrls.add(row[0].toLowerCase().replace(/\\/$/, ''));\n      }\n    }\n  }\n} catch (err) {}\n\nconst goodTitles = ['vp','svp','vice president','director','senior manager','head of','chief','cmo','cso','strategy','strategic planning','market research','market intelligence','consumer insights','competitive intelligence','business intelligence','corporate development','marketing','business development','product development','product strategy','policy','growth','innovation','commercial','insights','research'];\nconst badTitles = ['student','intern','coordinator','ux research','user research','recruiter','talent','hr ','human resources','software engineer','developer','looking for opportunities','seeking','aspiring','freelancer','looking for work','open to work'];\nconst negativeKeywords = ['survey tool','survey platform','survey software','focus group recruitment','nps score','a/b test','a/b testing','ux research','user testing','qualtrics','surveymonkey','typeform','customer satisfaction survey','influencer marketing','content creator','we are hiring',\"we're hiring\",'now hiring','job opening','job opportunity','open position','open role','join our team','apply now','apply here','#hiring','#opentowork','#jobopening','looking to hire','we have an opening'];\nconst reportSpamSignals = ['cagr','sample copy','forecast period','market size was valued','request a sample','limited-time special discount','market reached a valuation','market report','well-research report','get well-research report'];\nconst tier1Keywords = ['looking for market data','environmental scan','need industry data','market sizing','competitive intelligence','go to market','go-to-market','entering a new market','market expansion','competitive landscape','industry analysis','does anyone know','recommendations for','strategic planning process','starting our strategic plan','evidence-based','data to support','market intelligence','marketing intelligence'];\nconst tier2Keywords = ['strategic planning','market entry','market research','business case','due diligence','pestle','pestel','sector analysis','market scan','market landscape','competitive analysis','new market opportunity','diversification strategy','capital investment','board presentation','voice of the customer','product-market fit','market validation','market feasibility'];\n\nconst scored = [];\nfor (const post of posts) {\n  const headline = (post.author_headline || '').toLowerCase();\n  const snippet = (post.post_snippet || '').toLowerCase();\n  const authorUrl = (post.author_linkedin_url || '').toLowerCase().replace(/\\/$/, '');\n  const icpMatch = icpUrls.has(authorUrl);\n  if ((snippet.includes('billion') || snippet.includes('usd ')) && reportSpamSignals.some(s => snippet.includes(s))) continue;\n  if (reportSpamSignals.filter(s => snippet.includes(s)).length >= 2) continue;\n  const numLikes = parseInt(post.numLikes) || 0;\n  const numComments = parseInt(post.numComments) || 0;\n  const rawEngagement = numLikes + numComments;\n  if (!icpMatch && rawEngagement === 0 && (post.engagement_score || 0) === 0) continue;\n  if (negativeKeywords.some(k => snippet.includes(k))) continue;\n  if (badTitles.some(t => headline.includes(t))) continue;\n  let score = 0, tier = 3, matchedKeywords = [];\n  if (icpMatch) score += 5;\n  if (goodTitles.some(t => headline.includes(t))) score += 2;\n  const t1Hits = tier1Keywords.filter(k => snippet.includes(k));\n  if (t1Hits.length > 0) { score += 3; tier = 1; matchedKeywords.push(...t1Hits); }\n  const t2Hits = tier2Keywords.filter(k => snippet.includes(k));\n  if (t2Hits.length > 0 && tier > 2) { score += 2; tier = 2; matchedKeywords.push(...t2Hits); }\n  if (icpMatch && tier > 1) tier = 1;\n  if (rawEngagement > 50) score += 1;\n  if (rawEngagement > 200) score += 1;\n  if (score < 2) continue;\n  scored.push({ ...post, relevance_score: score, tier: tier, icp_list_match: icpMatch ? 'Yes' : 'No', keyword_matched: matchedKeywords.join(', ') || post.keyword_matched, date_found: new Date().toISOString().split('T')[0] });\n}\nscored.sort((a, b) => a.tier - b.tier || b.relevance_score - a.relevance_score);\nreturn scored.slice(0, 20).map(r => ({ json: r }));"
+      },
+      "position": [1584, 0],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "a0000001-0001-0001-0001-000000000023",
+      "name": "Geo Filter",
+      "parameters": {
+        "jsCode": "// Geo Filter - self-contained: enriches each scored survivor with author\n// location via the Apify profile scraper, then keeps only in-region authors.\n// Allowed regions: EU27 + UK + Canada + US + Australia + New Zealand.\n// Uses $input.all() only (survivors arrive directly from Score and Classify)\n// and calls Apify via this.helpers.httpRequest() - no named-node references.\n\nconst ALLOWED = new Set(['AT','BE','BG','HR','CY','CZ','DK','EE','FI','FR','DE','GR','HU','IE','IT','LV','LT','LU','MT','NL','PL','PT','RO','SK','SI','ES','SE','GB','UK','CA','US','AU','NZ']);\nconst DROP_UNKNOWN = true; // drop anyone whose location cannot be confirmed in-region\nconst APIFY_TOKEN = 'YOUR_APIFY_TOKEN';\n\nfunction userFromUrl(u) {\n  if (!u) return '';\n  const m = String(u).toLowerCase().match(/\\/in\\/([^\\/?#]+)/);\n  return m ? m[1] : '';\n}\n\nconst survivors = $input.all().map(i => i.json);\nif (survivors.length === 0) return [];\n\n// Unique profile URLs to enrich\nconst urls = [];\nconst seenUrl = new Set();\nfor (const s of survivors) {\n  const u = s.author_linkedin_url;\n  if (u && !seenUrl.has(u)) { seenUrl.add(u); urls.push(u); }\n}\n\n// Enrich via Apify profile scraper (run-sync returns the dataset items)\nlet profiles = [];\ntry {\n  const resp = await this.helpers.httpRequest({\n    method: 'POST',\n    url: `https://api.apify.com/v2/acts/datadoping~linkedin-profile-scraper/run-sync-get-dataset-items?token=${APIFY_TOKEN}`,\n    body: { profiles: urls },\n    json: true,\n    timeout: 600000\n  });\n  if (Array.isArray(resp)) profiles = resp;\n  else if (resp && Array.isArray(resp.items)) profiles = resp.items;\n} catch (err) {\n  // On enrichment failure, profiles stays empty -> everyone is UNKNOWN\n}\n\n// Build username -> { code, full }\nconst geoByUser = {};\nfor (const p of profiles) {\n  if (!p) continue;\n  const uname = (p.username || p.public_identifier || userFromUrl(p.profile_url) || userFromUrl(p.input) || '').toLowerCase();\n  if (!uname) continue;\n  const loc = p.location || {};\n  geoByUser[uname] = { code: (loc.country_code || '').toUpperCase(), full: loc.full || '' };\n}\n\n// Filter survivors by region\nconst kept = [];\nfor (const s of survivors) {\n  const uname = userFromUrl(s.author_linkedin_url);\n  const geo = geoByUser[uname];\n  const code = geo ? geo.code : '';\n  const inRegion = ALLOWED.has(code);\n  if (!inRegion) {\n    if (DROP_UNKNOWN || code) continue;\n  }\n  kept.push({ ...s, author_country: code || 'UNKNOWN', author_location: geo ? geo.full : '' });\n}\n\nreturn kept.map(r => ({ json: r }));"
+      },
+      "position": [1840, 0],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "a0000001-0001-0001-0001-000000000017",
+      "name": "LLM Qualify",
+      "parameters": {
+        "jsCode": "const posts = $input.all().map(i => i.json);\nif (posts.length === 0) return [];\n\nconst systemPrompt = `You are a lead qualification assistant for a boutique consulting firm that helps organizations with strategic planning, market sizing, competitive analysis, industry research, and market validation.\n\nEvaluate each LinkedIn post and determine if the author is likely a potential buyer.\n\nRate each post as:\n- HOT: Active buying intent or pain point the firm could solve.\n- WARM: Relevant role, worth engaging for relationship building.\n- COLD: Vendor/competitor, student, generic thought leadership, or syndicated content.\n\nRespond ONLY with a JSON array. No markdown, no backticks, no preamble. Each element must have:\n- \"index\": the post number (1-based)\n- \"rating\": \"HOT\", \"WARM\", or \"COLD\"\n- \"reason\": one sentence explaining your rating`;\n\nconst BATCH_SIZE = 5;\nconst allRatings = [];\n\nfor (let i = 0; i < posts.length; i += BATCH_SIZE) {\n  const batch = posts.slice(i, i + BATCH_SIZE);\n  const postSummaries = batch.map((p, idx) =>\n    `Post ${idx + 1}:\\nAuthor: ${p.author_name}\\nHeadline: ${p.author_headline}\\nSnippet: ${p.post_snippet}\\nKeywords matched: ${p.keyword_matched}\\nICP match: ${p.icp_list_match}`\n  ).join('\\n\\n---\\n\\n');\n\n  try {\n    const response = await this.helpers.httpRequest({\n      method: 'POST',\n      url: 'https://openrouter.ai/api/v1/chat/completions',\n      headers: { 'Authorization': 'Bearer YOUR_OPENROUTER_API_KEY', 'Content-Type': 'application/json' },\n      body: {\n        model: 'google/gemini-2.5-flash',\n        messages: [\n          { role: 'system', content: systemPrompt },\n          { role: 'user', content: `Evaluate these ${batch.length} LinkedIn posts:\\n\\n${postSummaries}` }\n        ],\n        temperature: 0.1, max_tokens: 4000\n      },\n      json: true\n    });\n\n    let cleaned = response.choices[0].message.content.trim().replace(/```json|```/g, '').trim();\n    if (!cleaned.endsWith(']')) {\n      const lastBrace = cleaned.lastIndexOf('}');\n      if (lastBrace > 0) cleaned = cleaned.substring(0, lastBrace + 1) + ']';\n    }\n\n    for (const rating of JSON.parse(cleaned)) {\n      const batchIdx = rating.index - 1;\n      if (batchIdx >= 0 && batchIdx < batch.length) {\n        allRatings.push({ globalIdx: i + batchIdx, rating: rating.rating, reason: rating.reason });\n      }\n    }\n  } catch (err) {\n    for (let j = 0; j < batch.length; j++) {\n      allRatings.push({ globalIdx: i + j, rating: 'UNSCORED', reason: 'LLM batch failed: ' + err.message });\n    }\n  }\n}\n\nconst qualified = allRatings\n  .filter(r => r.rating !== 'COLD')\n  .map(r => ({ ...posts[r.globalIdx], llm_rating: r.rating, llm_reason: r.reason }));\n\nqualified.sort((a, b) => {\n  if (a.llm_rating === 'HOT' && b.llm_rating !== 'HOT') return -1;\n  if (a.llm_rating !== 'HOT' && b.llm_rating === 'HOT') return 1;\n  return b.relevance_score - a.relevance_score;\n});\n\nreturn qualified.map(r => ({ json: r }));"
+      },
+      "position": [2096, 0],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      },
+      "id": "a0000001-0001-0001-0001-000000000013",
+      "maxTries": 3,
+      "name": "Write Already Seen",
+      "parameters": {
+        "columns": {
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false,
+          "mappingMode": "defineBelow",
+          "matchingColumns": [],
+          "schema": [
+            { "canBeUsedToMatch": true, "defaultMatch": false, "display": true, "displayName": "post_url", "id": "post_url", "required": false, "type": "string" },
+            { "canBeUsedToMatch": true, "defaultMatch": false, "display": true, "displayName": "date_first_seen", "id": "date_first_seen", "required": false, "type": "string" },
+            { "canBeUsedToMatch": true, "defaultMatch": false, "display": true, "displayName": "author_linkedin_url", "id": "author_linkedin_url", "required": false, "type": "string" },
+            { "canBeUsedToMatch": true, "defaultMatch": false, "display": true, "displayName": "author_name", "id": "author_name", "required": false, "type": "string" }
+          ],
+          "value": {
+            "author_linkedin_url": "={{ $json.author_linkedin_url }}",
+            "author_name": "={{ $json.author_name }}",
+            "date_first_seen": "={{ $json.date_found }}",
+            "post_url": "={{ $json.post_url }}"
+          }
+        },
+        "documentId": {
+          "__rl": true,
+          "cachedResultName": "LinkedIn Social Listening",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit",
+          "mode": "list",
+          "value": "YOUR_GOOGLE_SHEET_ID"
+        },
+        "operation": "append",
+        "options": {},
+        "sheetName": { "__rl": true, "mode": "name", "value": "Already Seen" }
+      },
+      "position": [2352, -208],
+      "retryOnFail": true,
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "waitBetweenTries": 5000
+    },
+    {
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      },
+      "id": "a0000001-0001-0001-0001-000000000014",
+      "maxTries": 3,
+      "name": "Write Engagement Queue",
+      "parameters": {
+        "columns": {
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false,
+          "mappingMode": "defineBelow",
+          "matchingColumns": [],
+          "schema": [
+            { "canBeUsedToMatch": true, "defaultMatch": false, "display": true, "displayName": "date_found", "id": "date_found", "required": false, "type": "string" },
+            { "canBeUsedToMatch": true, "defaultMatch": false, "display": true, "displayName": "tier", "id": "tier", "required": false, "type": "string" },
+            { "canBeUsedToMatch": true, "defaultMatch": false, "display": true, "displayName": "relevance_score", "id": "relevance_score", "required": false, "type": "string" },
+            { "canBeUsedToMatch": true, "defaultMatch": false, "display": true, "displayName": "post_url", "id": "post_url", "required": false, "type": "string" },
+            { "canBeUsedToMatch": true, "defaultMatch": false, "display": true, "displayName": "author_name", "id": "author_name", "required": false, "type": "string" },
+            { "canBeUsedToMatch": true, "defaultMatch": false, "display": true, "displayName": "author_headline", "id": "author_headline", "required": false, "type": "string" },
+            { "canBeUsedToMatch": true, "defaultMatch": false, "display": true, "displayName": "author_linkedin_url", "id": "author_linkedin_url", "required": false, "type": "string" },
+            { "canBeUsedToMatch": true, "defaultMatch": false, "display": true, "displayName": "company", "id": "company", "required": false, "type": "string" },
+            { "canBeUsedToMatch": true, "defaultMatch": false, "display": true, "displayName": "post_snippet", "id": "post_snippet", "required": false, "type": "string" },
+            { "canBeUsedToMatch": true, "defaultMatch": false, "display": true, "displayName": "keyword_matched", "id": "keyword_matched", "required": false, "type": "string" },
+            { "canBeUsedToMatch": true, "defaultMatch": false, "display": true, "displayName": "icp_list_match", "id": "icp_list_match", "required": false, "type": "string" },
+            { "canBeUsedToMatch": true, "defaultMatch": false, "display": true, "displayName": "engagement_status", "id": "engagement_status", "removed": false, "required": false, "type": "string" },
+            { "canBeUsedToMatch": true, "defaultMatch": false, "display": true, "displayName": "engagement_notes", "id": "engagement_notes", "removed": false, "required": false, "type": "string" },
+            { "canBeUsedToMatch": true, "defaultMatch": false, "display": true, "displayName": "follow_up_action", "id": "follow_up_action", "removed": false, "required": false, "type": "string" },
+            { "canBeUsedToMatch": true, "defaultMatch": false, "display": true, "displayName": "llm_rating", "id": "llm_rating", "required": false, "type": "string" },
+            { "canBeUsedToMatch": true, "defaultMatch": false, "display": true, "displayName": "llm_reason", "id": "llm_reason", "required": false, "type": "string" }
+          ],
+          "value": {
+            "author_headline": "={{ $json.author_headline }}",
+            "author_linkedin_url": "={{ $json.author_linkedin_url }}",
+            "author_name": "={{ $json.author_name }}",
+            "company": "={{ $json.company }}",
+            "date_found": "={{ $json.date_found }}",
+            "icp_list_match": "={{ $json.icp_list_match }}",
+            "keyword_matched": "={{ $json.keyword_matched }}",
+            "llm_rating": "={{ $json.llm_rating }}",
+            "llm_reason": "={{ $json.llm_reason }}",
+            "post_snippet": "={{ $json.post_snippet }}",
+            "post_url": "={{ $json.post_url }}",
+            "relevance_score": "={{ $json.relevance_score }}",
+            "tier": "={{ $json.tier }}"
+          }
+        },
+        "documentId": {
+          "__rl": true,
+          "cachedResultName": "LinkedIn Social Listening",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit",
+          "mode": "list",
+          "value": "YOUR_GOOGLE_SHEET_ID"
+        },
+        "operation": "append",
+        "options": {},
+        "sheetName": { "__rl": true, "mode": "name", "value": "Engagement Queue" }
+      },
+      "position": [2352, 208],
+      "retryOnFail": true,
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "a0000001-0001-0001-0001-000000000015",
+      "name": "ClickUp Chat Notification",
+      "parameters": {
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "YOUR_CLICKUP_API_TOKEN" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "jsonBody": "={\"content\":\"LinkedIn Social Listening: New posts in your engagement queue today. Open your Google Sheet to review and engage.\"}",
+        "method": "POST",
+        "options": {},
+        "sendBody": true,
+        "sendHeaders": true,
+        "specifyBody": "json",
+        "url": "https://api.clickup.com/api/v3/workspaces/YOUR_WORKSPACE_ID/chat/channels/YOUR_CHANNEL_ID/messages"
+      },
+      "position": [2608, 208],
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4
+    },
+    {
+      "credentials": {
+        "twilioApi": {
+          "id": "YOUR_TWILIO_CREDENTIAL_ID",
+          "name": "Twilio account"
+        }
+      },
+      "id": "a0000001-0001-0001-0001-000000000016",
+      "name": "SMS Notification",
+      "parameters": {
+        "authentication": "predefinedCredentialType",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "To", "value": "YOUR_PHONE_NUMBER" },
+            { "name": "From", "value": "YOUR_TWILIO_PHONE_NUMBER" },
+            { "name": "Body", "value": "LinkedIn Listening: New posts ready in your engagement queue." }
+          ]
+        },
+        "contentType": "form-urlencoded",
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/x-www-form-urlencoded" }
+          ]
+        },
+        "method": "POST",
+        "nodeCredentialType": "twilioApi",
+        "options": {},
+        "sendBody": true,
+        "sendHeaders": true,
+        "url": "https://api.twilio.com/2010-04-01/Accounts/YOUR_TWILIO_ACCOUNT_SID/Messages.json"
+      },
+      "position": [2864, 208],
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": { "main": [[{ "index": 0, "node": "Apify - Trigger Search", "type": "main" }]] },
+    "Apify - Trigger Search": { "main": [[{ "index": 0, "node": "Wait for Apify", "type": "main" }]] },
+    "Wait for Apify": { "main": [[{ "index": 0, "node": "Apify - Get Results", "type": "main" }]] },
+    "Apify - Get Results": { "main": [[{ "index": 0, "node": "Normalize Results", "type": "main" }]] },
+    "Normalize Results": { "main": [[{ "index": 0, "node": "Deduplicate", "type": "main" }]] },
+    "Deduplicate": { "main": [[{ "index": 0, "node": "Score and Classify", "type": "main" }]] },
+    "Score and Classify": { "main": [[{ "index": 0, "node": "Geo Filter", "type": "main" }]] },
+    "Geo Filter": { "main": [[{ "index": 0, "node": "LLM Qualify", "type": "main" }]] },
+    "LLM Qualify": { "main": [[{ "index": 0, "node": "Write Already Seen", "type": "main" }, { "index": 0, "node": "Write Engagement Queue", "type": "main" }]] },
+    "Write Engagement Queue": { "main": [[{ "index": 0, "node": "ClickUp Chat Notification", "type": "main" }]] },
+    "ClickUp Chat Notification": { "main": [[{ "index": 0, "node": "SMS Notification", "type": "main" }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Vancouver"
+  }
+}
